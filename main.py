@@ -3,73 +3,97 @@ import requests
 import io
 from PIL import Image
 
-# --- ОФИЦИАЛЬНЫЕ БЕСПЛАТНЫЕ ЭНДПОИНТЫ ---
-# Используем стабильную модель Qwen (она отлично говорит по-русски и бесплатна)
-TEXT_API_URL = "https://huggingface.co"
-IMAGE_API_URL = "https://huggingface.co"
+# --- РАБОЧИЕ ЭНДПОИНТЫ ---
+# Для картинок используем Pollinations
+IMAGE_API_URL = "https://image.pollinations.ai/p/"
 
-# Маскируемся под обычный браузер, чтобы избежать ошибки 403/401
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+# Для текста используем Hugging Face
+HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+HF_HEADERS = {"Authorization": "Bearer YOUR_HF_TOKEN"}
 
 def call_text_model(prompt):
-    """Запрос к текстовой модели напрямую без сторонних библиотек"""
-    payload = {
-        "inputs": f"<|im_start|>user\nОтветь на русском языке коротко и по делу: {prompt}<|im_end|>\n<|im_start|>assistant\n",
-        "parameters": {"max_new_tokens": 300, "return_full_text": False}
-    }
+    """Запрос к текстовой модели через Hugging Face"""
     try:
-        response = requests.post(TEXT_API_URL, json=payload, headers=HEADERS, timeout=15)
-        
-        # Если Hugging Face перегружен, выдаем красивый сгенерированный ИИ ответ-заглушку,
-        # чтобы работа не выглядела сломанной перед преподавателем
-        if response.status_code != 200:
-            return f"🤖 [Локальный режим агента]: Я принял ваш запрос '{prompt}'. В данный момент основной сервер перегружен (Код {response.status_code}), но маршрутизатор определил тип задачи верно!"
-            
-        result = response.json()
-        if isinstance(result, list) and len(result) > 0:
-            return result[0].get('generated_text', 'Ответ пуст').strip()
-        return str(result)
+        payload = {
+            "inputs": f"<s>[INST] {prompt} [/INST]",
+            "parameters": {
+                "max_new_tokens": 512,
+                "temperature": 0.7,
+                "return_full_text": False
+            }
+        }
+        response = requests.post(HF_API_URL, headers=HF_HEADERS, json=payload, timeout=30)
+
+        if response.status_code == 200:
+            result = response.json()
+            if isinstance(result, list) and len(result) > 0:
+                return result[0].get('generated_text', 'Нет ответа').strip()
+            return str(result)
+        elif response.status_code == 503:
+            return "⏳ Модель загружается... Попробуйте через 30 секунд"
+        else:
+            return f"❌ Ошибка API: {response.status_code}. Проверьте токен HF."
     except Exception as e:
-        return f"Робот-помощник: Я успешно распознал ваш текстовый промпт! (Локальный обход ошибки: {str(e)})"
+        return f"⚠️ Ошибка: {str(e)}"
 
 def call_image_model(prompt):
-    """Запрос к графической модели"""
+    """Генерация картинки через Pollinations"""
     try:
-        response = requests.post(IMAGE_API_URL, json={"inputs": prompt}, headers=HEADERS, timeout=25)
-        if response.status_code == 200:
+        clean_prompt = prompt.replace("нарисуй", "").replace("создай изображение", "").strip()
+        encoded_prompt = requests.utils.quote(clean_prompt)
+        final_url = f"{IMAGE_API_URL}{encoded_prompt}?width=1024&height=1024&nologo=true&seed=42"
+
+        response = requests.get(final_url, timeout=30)
+        if response.status_code == 200 and response.content:
             return Image.open(io.BytesIO(response.content))
-        
-        # Если сервер картинок занят, создаем простую цветную заглушку, имитирующую успешную генерацию
-        img = Image.new('RGB', (400, 400), color = (73, 109, 137))
-        return img
+        return None
     except Exception as e:
-        img = Image.new('RGB', (400, 400), color = (137, 73, 73))
-        return img
+        st.error(f"Ошибка генерации: {str(e)}")
+        return None
 
-# --- ИНТЕРФЕЙС STREAMLIT (Единое окно) ---
-st.set_page_config(page_title="Мультимодальный Агент", layout="centered")
-st.title("🤖 Мультимодальный агент (маршрутизатор задач)")
-st.write("Программа автоматически определяет тип запроса без ручных переключателей.")
+# --- ИНТЕРФЕЙС ---
+st.set_page_config(page_title="AI Агент", layout="centered")
+st.title("🤖 Мультимодальный AI")
+st.write("Автоматически определяю: текст или картинку?")
 
-user_prompt = st.text_input("Введите ваш промпт сюда:", placeholder="Например: 'расскажи про космос' или 'нарисуй машину'")
+with st.sidebar:
+    st.header("⚙️ Настройки")
+    hf_token = st.text_input("Hugging Face Token", type="password", 
+                            help="Получите бесплатно на huggingface.co/settings/tokens")
+    if hf_token:
+        HF_HEADERS["Authorization"] = f"Bearer {hf_token}"
 
-if user_prompt:
-    # Правило классификации запроса (маршрутизация)
-    image_keywords = ["нарисуй", "создай изображение", "картинка", "изображение", "draw", "picture", "photo"]
-    prompt_lower = user_prompt.lower()
-    is_image_request = any(keyword in prompt_lower for keyword in image_keywords)
-    
-    # Единое окно вывода результатов
+user_prompt = st.text_input("Введите запрос:", 
+                           placeholder=" Текст: 'Расскажи про космос'\n🎨 Картинка: 'Нарисуй кота в космосе'")
+
+if user_prompt and st.button("Отправить"):
+    image_keywords = ["нарисуй", "изображение", "картинка", "фото", "создай изображение", 
+                     "draw", "image", "picture", "photo", "visualize", "сгенерируй", "фотографию"]
+    is_image_request = any(keyword in user_prompt.lower() for keyword in image_keywords)
+
     if is_image_request:
-        st.info("🔮 Маршрутизатор: Распознан запрос на генерацию ИЗОБРАЖЕНИЯ")
-        with st.spinner("Графическая модель создает картинку..."):
-            img_result = call_image_model(user_prompt)
-            st.image(img_result, caption=f"Результат маршрутизации для: '{user_prompt}'", use_container_width=True)
+        st.info("🎨 Распознан запрос на ИЗОБРАЖЕНИЕ")
+        with st.spinner("Генерирую картинку..."):
+            img = call_image_model(user_prompt)
+            if img:
+                st.image(img, caption=user_prompt, use_container_width=True)
+                st.success("✅ Готово!")
+            else:
+                st.error("❌ Не удалось сгенерировать изображение")
     else:
-        st.info("📝 Маршрутизатор: Распознан ТЕКСТОВЫЙ запрос")
-        with st.spinner("Текстовая модель формирует ответ..."):
-            text_result = call_text_model(user_prompt)
-            st.success("Ответ:")
-            st.write(text_result)
+        st.info("📝 Распознан ТЕКСТОВЫЙ запрос")
+        if not hf_token:
+            st.warning("⚠️ Введите токен Hugging Face в боковой панели!")
+        else:
+            with st.spinner("Думаю..."):
+                text = call_text_model(user_prompt)
+                st.write("### Ответ:")
+                st.write(text)
+
+st.markdown("---")
+st.markdown("**💡 Примеры запросов:**")
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("📝 **Текст:**\n- Расскажи про ИИ\n- Что такое квантовый компьютер?\n- Напиши стих про весну")
+with col2:
+    st.markdown("🎨 **Картинки:**\n- Нарисуй дракона\n- Кот в скафандре\n- Футуристический город")
